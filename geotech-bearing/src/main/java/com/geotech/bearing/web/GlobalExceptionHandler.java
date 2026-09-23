@@ -1,5 +1,7 @@
 package com.geotech.bearing.web;
 
+import com.geotech.bearing.layeredprofile.LayeredProfileAlreadyExistsException;
+import com.geotech.bearing.layeredprofile.LayeredProfileNotFoundException;
 import com.geotech.bearing.profile.ProfileAlreadyExistsException;
 import com.geotech.bearing.profile.ProfileNotFoundException;
 import com.geotech.bearing.validation.InvalidInputException;
@@ -39,6 +41,18 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleConflict(ProfileAlreadyExistsException ex,
                                                         HttpServletRequest req) {
         return build(HttpStatus.CONFLICT, "PROFILE_ALREADY_EXISTS", ex.getMessage(), req);
+    }
+
+    @ExceptionHandler(LayeredProfileNotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleLayeredNotFound(LayeredProfileNotFoundException ex,
+                                                               HttpServletRequest req) {
+        return build(HttpStatus.NOT_FOUND, "LAYERED_PROFILE_NOT_FOUND", ex.getMessage(), req);
+    }
+
+    @ExceptionHandler(LayeredProfileAlreadyExistsException.class)
+    public ResponseEntity<ErrorResponse> handleLayeredConflict(LayeredProfileAlreadyExistsException ex,
+                                                               HttpServletRequest req) {
+        return build(HttpStatus.CONFLICT, "LAYERED_PROFILE_ALREADY_EXISTS", ex.getMessage(), req);
     }
 
     @ExceptionHandler({MethodArgumentNotValidException.class})
