@@ -1,5 +1,8 @@
 package com.geotech.bearing.web;
 
+import com.geotech.bearing.layered.profile.LayeredProfileAlreadyExistsException;
+import com.geotech.bearing.layered.profile.LayeredProfileNotFoundException;
+import com.geotech.bearing.layered.validation.LayerValidationException;
 import com.geotech.bearing.profile.ProfileAlreadyExistsException;
 import com.geotech.bearing.profile.ProfileNotFoundException;
 import com.geotech.bearing.validation.InvalidInputException;
@@ -29,6 +32,19 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.BAD_REQUEST, ex.getReason(), ex.getMessage(), req);
     }
 
+    /**
+     * 分层剖面结构/某层指标非法：仍是 400，但额外带「第几层」（0 基层号），
+     * 让调用方直接定位出问题的层。{@link LayerValidationException} 是
+     * {@link InvalidInputException} 的子类，本处理器必须在其父类之前匹配。
+     */
+    @ExceptionHandler(LayerValidationException.class)
+    public ResponseEntity<ErrorResponse> handleLayerInvalid(LayerValidationException ex,
+                                                            HttpServletRequest req) {
+        int layerIndex = ex.getLayerIndexZeroBased();
+        Integer layerField = layerIndex == LayerValidationException.NO_LAYER ? null : layerIndex;
+        return build(HttpStatus.BAD_REQUEST, ex.getReason(), ex.getMessage(), req, layerField);
+    }
+
     @ExceptionHandler(ProfileNotFoundException.class)
     public ResponseEntity<ErrorResponse> handleNotFound(ProfileNotFoundException ex,
                                                         HttpServletRequest req) {
@@ -39,6 +55,20 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleConflict(ProfileAlreadyExistsException ex,
                                                         HttpServletRequest req) {
         return build(HttpStatus.CONFLICT, "PROFILE_ALREADY_EXISTS", ex.getMessage(), req);
+    }
+
+    /** 点名未登记的分层剖面：404，原因码与单层档区分。 */
+    @ExceptionHandler(LayeredProfileNotFoundException.class)
+    public ResponseEntity<ErrorResponse> handleLayeredNotFound(LayeredProfileNotFoundException ex,
+                                                               HttpServletRequest req) {
+        return build(HttpStatus.NOT_FOUND, "LAYERED_PROFILE_NOT_FOUND", ex.getMessage(), req);
+    }
+
+    /** 分层剖面重名：409，原因码与单层档区分。 */
+    @ExceptionHandler(LayeredProfileAlreadyExistsException.class)
+    public ResponseEntity<ErrorResponse> handleLayeredConflict(LayeredProfileAlreadyExistsException ex,
+                                                               HttpServletRequest req) {
+        return build(HttpStatus.CONFLICT, "LAYERED_PROFILE_ALREADY_EXISTS", ex.getMessage(), req);
     }
 
     @ExceptionHandler({MethodArgumentNotValidException.class})
@@ -80,8 +110,14 @@ public class GlobalExceptionHandler {
 
     private ResponseEntity<ErrorResponse> build(HttpStatus status, String reason,
                                                 String message, HttpServletRequest req) {
+        return build(status, reason, message, req, null);
+    }
+
+    private ResponseEntity<ErrorResponse> build(HttpStatus status, String reason,
+                                                String message, HttpServletRequest req,
+                                                Integer layerIndex) {
         ErrorResponse body = new ErrorResponse(
-                Instant.now(), status.value(), reason, message, req.getRequestURI());
+                Instant.now(), status.value(), reason, message, req.getRequestURI(), layerIndex);
         return ResponseEntity.status(status).body(body);
     }
 }

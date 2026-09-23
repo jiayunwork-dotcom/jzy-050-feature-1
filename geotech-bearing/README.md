@@ -63,6 +63,68 @@ Nq、Nc、Nγ 与下游三项叠加共用同一组换算结果，不会出现因
 
 ---
 
+## 1A. 分层剖面：折算窗口与非线性等效指标
+
+当基础影响范围内摆着多层不同的土（例如上面填土、下面原状土）时，登记侧按深度顺序
+给出每一层的**层厚、c、φ、γ**；核算前服务在给定埋深 Df 与宽度 B 下，先把落在折算
+窗口内的各层折成一组等效单层指标，再让这组等效指标走**与单层参数完全相同的**因子/
+三项叠加计算路径。因子计算、黏土极限退化、形状修正等内核一行未改，分层折算只是喂给
+内核之前多做的一步预处理。
+
+### 折算窗口（起点是埋深，不是地表）
+
+```
+窗口 = [Df, Df + B/2]
+```
+
+- 窗口从**埋深处**起算；埋深落在哪一层内部，窗口就从那一层往下切开，比 Df 更浅的部分
+  不计入折算；
+- 各层按其在窗口内**实际占到的厚度**参与折算；只有一部分落入窗口的层只算落入的那段，
+  窗口以下的层完全不参与；
+- 窗口下界探出剖面底面时**不补虚拟层**，实际能取到多少算多少，响应中以
+  `windowTruncated` 标明；
+- 埋深已达到/超过剖面底面、窗口内没有任何层可取时，直接返回结构化错误
+  `EMBEDMENT_BELOW_PROFILE`。
+
+### 等效指标折算（φ 必须非线性折算）
+
+设第 i 层在窗口内的实际厚度为 tᵢ：
+
+```
+c_eq  = Σ(tᵢ·cᵢ) / Σtᵢ                  （黏聚力：厚度加权算术平均）
+γ_eq  = Σ(tᵢ·γᵢ) / Σtᵢ                  （重度：厚度加权算术平均）
+φ_eq  = atan( Σ(tᵢ·tan φᵢ) / Σtᵢ )      （内摩擦角：先换 tan 再厚度加权，最后反算角度）
+```
+
+> ⚠️ **φ 绝不允许直接对角度做厚度加权算术平均**。角度是非线性量，直接平均后代入承载力
+> 因子公式会失真；必须先换算成正切再加权，再 `atan` 反算回角度（各层 φ∈[0,90)，
+> 加权正切非负，反算结果天然落在 [0,90)）。自动化测试在同一组分层上同时计算两种口径，
+> 钉死它们必须给出不同结果。
+
+退化：如果窗口内只有一层参与（埋深处所在层单独就填满整个窗口，或窗口被剖面底面截断到
+只剩一层），等效结果**严格等于这一层自己的 c、φ、γ**（直接返回该层指标，不经三角
+往返，连浮点噪声都不留），该退化点有专门测试钉住。
+
+### 分层结构校验（折算前拦截，错误指出层号）
+
+- 至少一层；**第一层必须从深度 0 起算**（贴地表）；
+- 每层**层厚必须为正**；
+- 自上而下每层顶面必须与上一层底面**正好相接**：有间隙 → `LAYER_GAP`，
+  有重叠 → `LAYER_OVERLAP`（1e-9 m 内的接续面浮点噪声视为正好相接）；
+- 每层各自的 c、φ、γ 沿用既有判据（`COHESION_NEGATIVE`、
+  **`FRICTION_ANGLE_OUT_OF_RANGE`（φ≥90° 照样拦）**、`UNIT_WEIGHT_NOT_POSITIVE`），
+  错误响应额外携带 `layerIndex`（0 基，与数组下标一致），明确是第几层出了问题，
+  绝不静默跳过继续折算。
+
+### 独立性
+
+分层剖面与单层参数档是**两套并行独立的能力**：独立的表
+（`layered_soil_profiles` / `soil_layers`）、独立的接口路径、独立的命名空间——
+两边允许同名共存，点名核算时一次请求明确分辨自己引用的是哪一种，互不覆盖、互不干扰。
+分层剖面同样持久化在 PostgreSQL，重启后仍可点名取出。
+
+---
+
 ## 2. 模块划分（单一职责，未塞进一个类）
 
 ```
@@ -75,7 +137,17 @@ profile/       SoilProfileEntity / Repository / SoilProfileService（参数档�
                DemoProfileInitializer（内置示范档，幂等）
 service/       BearingService（核算编排：点名/临时两种参数来源）
                WidthScanService（固定其余条件、宽度区间扫描）
-web/           控制器、DTO、GlobalExceptionHandler（结构化错误）
+layered/       并行的分层剖面能力（独立子包，不与单层内核搅在一起）：
+  domain/        SoilLayer（绝对深度区间）、LayeredProfileAssembler（层厚累加为深度区间）、
+                 ReductionWindow、LayerContribution
+  validation/    LayeredProfileValidator（贴地表/相接/层厚/各层指标，错误带层号）
+  calc/          ReductionWindowResolver（折算窗口 [Df, Df+B/2] 确定与切层）
+                 EquivalentParametersReducer（c/γ 厚度加权；φ 走 tan 加权反算）
+                 LayeredBearingResult（摊开折算过程的结果）
+  profile/       LayeredProfileEntity / SoilLayerEntity / Repository /
+                 LayeredProfileService（分层剖面独立存取）
+  service/       LayeredBearingService（分层核算编排：折算后复用既有 TerzaghiBearingCalculator）
+web/           控制器、DTO、GlobalExceptionHandler（结构化错误；分层错误额外带 layerIndex）
 ```
 
 ---
@@ -152,6 +224,56 @@ Base URL：`http://localhost:8080`
 ```
 返回 `{ "count": 4, "points": [ …每个宽度一个完整核算结果… ] }`。
 
+### 分层剖面
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| POST | `/api/layered-profiles` | 登记分层剖面（name 在分层表内唯一；登记前做结构与指标校验） |
+| GET  | `/api/layered-profiles` | 列出全部分层剖面 |
+| GET  | `/api/layered-profiles/{name}` | 按名取出原始分层列表（层序、层厚、各层指标） |
+| POST | `/api/layered-bearings/calculate` | 分层核算（`layeredProfileName` 与 `layers` 二选一） |
+
+登记请求体（每层给**层厚**与三个指标，层序即数组顺序、自上而下）：
+```json
+{ "name": "fill-over-alluvium", "description": "填土下卧原状土",
+  "layers": [
+    {"thicknessM": 2.0, "cohesionKpa": 10, "frictionAngleDeg": 10, "unitWeightKnM3": 18},
+    {"thicknessM": 3.0, "cohesionKpa": 30, "frictionAngleDeg": 30, "unitWeightKnM3": 20},
+    {"thicknessM": 5.0, "cohesionKpa": 5,  "frictionAngleDeg": 25, "unitWeightKnM3": 19}
+  ] }
+```
+
+分层核算请求体（临时给整组分层不必先登记；点名则给 `layeredProfileName`）：
+```json
+{ "layers": [ ...同上... ], "widthM": 4.0, "depthM": 1.0, "shape": "STRIP" }
+```
+
+响应除最终因子与 qu 外，把折算过程完全摊开：
+```json
+{ "source": "INLINE", "profileName": null,
+  "window": {"topDepthM": 1.0, "bottomDepthM": 3.0, "lengthM": 2.0},
+  "windowTruncated": false, "actualWindowThicknessM": 2.0,
+  "layerContributions": [
+    {"layerIndex": 0, "topDepthM": 0.0, "bottomDepthM": 2.0, "thicknessM": 2.0,
+     "cohesionKpa": 10.0, "frictionAngleDeg": 10.0, "unitWeightKnM3": 18.0,
+     "contributedThicknessM": 1.0, "participating": true},
+    {"layerIndex": 1, "...": "...", "contributedThicknessM": 1.0, "participating": true},
+    {"layerIndex": 2, "...": "...", "contributedThicknessM": 0.0, "participating": false}
+  ],
+  "equivalentSoil": {"cohesionKpa": 20.0, "frictionAngleDeg": 20.548..., "unitWeightKnM3": 19.0},
+  "bearing": { "source": "EQUIVALENT",
+    "factors": {"nc": ..., "nq": ..., "ngamma": ...},
+    "shapeFactors": {"sc": 1.0, "sq": 1.0, "sGamma": 1.0},
+    "terms": {"cohesionTermKpa": ..., "surchargeTermKpa": ..., "weightTermKpa": ..., "quKpa": ...} } }
+```
+
+分层结构错误仍是统一结构化错误（400），并额外携带出问题的层号：
+```json
+{ "status": 400, "error": "LAYER_GAP",
+  "message": "第 2 层顶面（深度 3.0 m）没有接住上一层底面（深度 2.0 m），中间留有 1.0 m 空隙，不允许。",
+  "layerIndex": 1, "path": "/api/layered-bearings/calculate" }
+```
+
 其他：`GET /actuator/health` 健康检查。
 
 ### 内置示范参数档
@@ -204,7 +326,7 @@ java -jar target/bearing-capacity-service-1.0.0.jar \
 
 ---
 
-## 7. 自动化测试覆盖（共 43 个用例，全绿）
+## 7. 自动化测试覆盖（共 89 个用例，全绿）
 
 - `BearingFactorsCalculatorTest`：φ=0 黏土极限（5.14/1/0、不除零、全有限值）；
   φ=30° 接近文献表值；因子随 φ 单调上升；极小 φ 数值稳定。
@@ -220,3 +342,22 @@ java -jar target/bearing-capacity-service-1.0.0.jar \
   重复 409、φ=90 拦截、示范档扫描趋势、方形修正；
   **并发**：8 线程各登记独立档并多次核算结果稳定且互不污染；6 线程并发登记同名恰好一成五冲突。
 - `PersistenceAcrossRestartTest`：参数档落关系库，关闭并重启第二个 Spring 上下文后仍可点名取用。
+- `LayeredProfileValidatorTest`（分层结构）：第一层不贴地表、**层间间隙 LAYER_GAP**、
+  **重叠 LAYER_OVERLAP**、层厚非正、层数为空、某层 φ=90°/重度非正/黏聚力为负（沿用单层原因码
+  且带层号）、接续面 1e-12 浮点噪声放行。
+- `ReductionWindowResolverTest`（折算窗口）：**窗口起点随埋深下移并从埋深处所在层切开**、
+  部分落入只计落入段、跨三层窗口、**窗口探出剖面底面截断且不补层**、埋深正好落在层界面、
+  埋深超过剖面底面拒绝、0 贡献层不参与。
+- `EquivalentParametersReducerTest`（**非线性折算**）：c/γ 厚度加权算术平均；
+  **φ 走 tan 加权再 atan 反算，与错误的角度算术平均在同一组数据上必须给出不同结果**
+  （等厚与不等厚两组）；**单层填满窗口时严格退化为该层自身 c/φ/γ（含 φ 精确相等）**；
+  全 φ=0 退化；无参与层拒绝。
+- `LayeredBearingServiceTest`：临时分层核算的窗口/等效值/qu、退化情形与单层路径结果一致、
+  截断窗口、层间间隙在折算前拦截、埋深越界、方形修正沿用既有内核、宽度非正拦截。
+- `LayeredBearingApiIntegrationTest`（分层 HTTP 端到端）：登记/列出/按名取出、重名 409、
+  未登记 404、层厚非正/某层 φ=90/缺字段全部 400 且带 `layerIndex`、埋深越界、
+  点名与临时来源二选一、折算过程完整摊开、退化 qu 与既有单层核算接口结果严格一致、
+  截断标记、埋深下移切换窗口起点；**分层剖面与单层档同名共存、互不串台**；
+  **8 线程并发各登记独立分层剖面并多次核算，结果稳定、互不污染**。
+- `LayeredProfilePersistenceTest`：分层剖面（含各层）落关系库，重启第二个上下文后
+  层序、层厚、各层指标与累加出的顶/底深度全部不丢。
